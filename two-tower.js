@@ -1,25 +1,45 @@
-// two-tower.js (FIXED MLP TRAINING)
+// two-tower.js (FIXED VARIABLE REGISTRATION)
 class TwoTowerModel {
-    constructor(numUsers, numItems, embeddingDim, modelType = 'simple', mlpConfig = {}) {
+    constructor(numUsers, numItems, embeddingDim, modelType = 'simple', mlpConfig = {}, modelId = '') {
         this.numUsers = numUsers;
         this.numItems = numItems;
         this.embeddingDim = embeddingDim;
         this.modelType = modelType;
         this.mlpConfig = mlpConfig;
+        this.modelId = modelId || `model_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         
-        console.log(`Creating TwoTowerModel: ${modelType}, users: ${numUsers}, items: ${numItems}, embDim: ${embeddingDim}`);
+        console.log(`Creating TwoTowerModel: ${modelType}, ID: ${this.modelId}, users: ${numUsers}, items: ${numItems}, embDim: ${embeddingDim}`);
+        
+        // Use unique variable names to avoid registration conflicts
+        const userEmbeddingName = `user_embeddings_${this.modelId}`;
+        const itemEmbeddingName = `item_embeddings_${this.modelId}`;
+        
+        // Check if variables already exist and dispose them first
+        try {
+            const existingUserVars = tf.engine().state.registeredVariables;
+            if (existingUserVars[userEmbeddingName]) {
+                console.log(`Disposing existing variable: ${userEmbeddingName}`);
+                tf.disposeVariables(userEmbeddingName);
+            }
+            if (existingUserVars[itemEmbeddingName]) {
+                console.log(`Disposing existing variable: ${itemEmbeddingName}`);
+                tf.disposeVariables(itemEmbeddingName);
+            }
+        } catch (e) {
+            console.log('No existing variables to dispose');
+        }
         
         // Initialize embedding tables with small random values
         this.userEmbeddings = tf.variable(
-            tf.randomNormal([numUsers, embeddingDim], 0, 0.01), // Smaller stddev for stability
+            tf.randomNormal([numUsers, embeddingDim], 0, 0.01),
             true, 
-            'user_embeddings'
+            userEmbeddingName
         );
         
         this.itemEmbeddings = tf.variable(
-            tf.randomNormal([numItems, embeddingDim], 0, 0.01), // Smaller stddev for stability
+            tf.randomNormal([numItems, embeddingDim], 0, 0.01),
             true, 
-            'item_embeddings'
+            itemEmbeddingName
         );
         
         // MLP-specific components
@@ -28,32 +48,32 @@ class TwoTowerModel {
             this.itemFeatures = null;
             
             const userFeatureDim = mlpConfig.userFeatureDim || 3;
-            const itemFeatureDim = mlpConfig.itemFeatureDim || 19; // 19 genres in MovieLens
+            const itemFeatureDim = mlpConfig.itemFeatureDim || 19;
             const hiddenUnits = mlpConfig.hiddenUnits || 64;
             
             console.log(`Building MLP towers: user_dim=${userFeatureDim}, item_dim=${itemFeatureDim}, hidden=${hiddenUnits}, output=${embeddingDim}`);
             
-            // User tower MLP with one hidden layer
+            // User tower MLP
             this.userTower = this.buildMLP(
                 userFeatureDim,
                 hiddenUnits,
                 embeddingDim,
-                'user_tower'
+                `user_tower_${this.modelId}`
             );
             
-            // Item tower MLP with one hidden layer  
+            // Item tower MLP  
             this.itemTower = this.buildMLP(
                 itemFeatureDim,
                 hiddenUnits,
                 embeddingDim,
-                'item_tower'
+                `item_tower_${this.modelId}`
             );
             
-            // Separate optimizer for MLP weights with lower learning rate
-            this.mlpOptimizer = tf.train.adam(0.0005); // Lower learning rate for MLP
+            // Separate optimizer for MLP weights
+            this.mlpOptimizer = tf.train.adam(0.0005);
         }
         
-        // Adam optimizer for stable training (for simple model and embeddings)
+        // Adam optimizer for stable training
         this.optimizer = tf.train.adam(0.001);
         
         console.log('TwoTowerModel created successfully');
@@ -64,19 +84,14 @@ class TwoTowerModel {
         
         const model = tf.sequential();
         
-        // Hidden layer with ReLU activation
+        // Hidden layer
         model.add(tf.layers.dense({
             units: hiddenUnits,
             activation: 'relu',
             inputShape: [inputDim],
-            kernelInitializer: 'glorotNormal', // Better initialization
+            kernelInitializer: 'glorotNormal',
             biasInitializer: 'zeros',
             name: `${name}_hidden`
-        }));
-        
-        // Optional: Add batch normalization for stability
-        model.add(tf.layers.batchNormalization({
-            name: `${name}_batch_norm`
         }));
         
         // Output layer
@@ -106,7 +121,7 @@ class TwoTowerModel {
         }
     }
     
-    // User tower: simple embedding lookup or MLP with features
+    // User tower: simple embedding lookup or MLP
     userForward(userIndices) {
         if (this.modelType === 'simple') {
             return tf.gather(this.userEmbeddings, userIndices);
@@ -119,7 +134,7 @@ class TwoTowerModel {
         }
     }
     
-    // Item tower: simple embedding lookup or MLP with genre features
+    // Item tower: simple embedding lookup or MLP
     itemForward(itemIndices) {
         if (this.modelType === 'simple') {
             return tf.gather(this.itemEmbeddings, itemIndices);
@@ -143,21 +158,17 @@ class TwoTowerModel {
         
         try {
             if (this.modelType === 'simple') {
-                // Simple model training
                 const lossFn = () => {
                     const userEmbs = this.userForward(userTensor);
                     const itemEmbs = this.itemForward(itemTensor);
                     
-                    // Compute similarity matrix: batch_size x batch_size
                     const logits = tf.matMul(userEmbs, itemEmbs, false, true);
                     
-                    // Labels: diagonal elements are positives
                     const labels = tf.oneHot(
                         tf.range(0, userIndices.length, 1, 'int32'), 
                         userIndices.length
                     );
                     
-                    // Softmax cross entropy loss
                     const loss = tf.losses.softmaxCrossEntropy(labels, logits);
                     return loss;
                 };
@@ -166,30 +177,19 @@ class TwoTowerModel {
                 return lossValue ? lossValue.dataSync()[0] : 0;
                 
             } else {
-                // MLP model training - use separate optimizer
                 const lossFn = () => {
                     const userEmbs = this.userForward(userTensor);
                     const itemEmbs = this.itemForward(itemTensor);
                     
-                    // Compute similarity matrix: batch_size x batch_size
                     const logits = tf.matMul(userEmbs, itemEmbs, false, true);
                     
-                    // Labels: diagonal elements are positives
                     const labels = tf.oneHot(
                         tf.range(0, userIndices.length, 1, 'int32'), 
                         userIndices.length
                     );
                     
-                    // Softmax cross entropy loss
                     const loss = tf.losses.softmaxCrossEntropy(labels, logits);
-                    
-                    // Add L2 regularization for MLP weights to prevent overfitting
-                    const l2Reg = tf.addN([
-                        tf.sum(tf.square(this.userTower.getWeights()[0])),
-                        tf.sum(tf.square(this.itemTower.getWeights()[0]))
-                    ]).mul(0.001);
-                    
-                    return tf.add(loss, l2Reg);
+                    return loss;
                 };
                 
                 const lossValue = this.mlpOptimizer.minimize(lossFn, true);
@@ -199,7 +199,6 @@ class TwoTowerModel {
             console.error('Error in trainStep:', error);
             throw error;
         } finally {
-            // Clean up tensors
             userTensor.dispose();
             itemTensor.dispose();
         }
@@ -214,11 +213,9 @@ class TwoTowerModel {
     async getScoresForAllItems(userEmbedding) {
         return await tf.tidy(() => {
             if (this.modelType === 'simple') {
-                // For simple model, use item embeddings
                 const scores = tf.dot(this.itemEmbeddings, userEmbedding);
                 return scores.dataSync();
             } else {
-                // For MLP model, we need to compute embeddings for all items
                 const allItemIndices = Array.from({length: this.numItems}, (_, i) => i);
                 const itemTensor = tf.tensor1d(allItemIndices, 'int32');
                 try {
@@ -236,12 +233,26 @@ class TwoTowerModel {
         if (this.modelType === 'simple') {
             return this.itemEmbeddings;
         } else {
-            // For MLP model, compute embeddings for all items
             const allItemIndices = Array.from({length: this.numItems}, (_, i) => i);
             const itemTensor = tf.tensor1d(allItemIndices, 'int32');
             const embeddings = this.itemForward(itemTensor);
             itemTensor.dispose();
             return embeddings;
+        }
+    }
+    
+    // Clean up method to dispose variables
+    dispose() {
+        console.log(`Disposing model: ${this.modelId}`);
+        try {
+            tf.dispose(this.userEmbeddings);
+            tf.dispose(this.itemEmbeddings);
+            if (this.userFeatures) tf.dispose(this.userFeatures);
+            if (this.itemFeatures) tf.dispose(this.itemFeatures);
+            if (this.userTower) this.userTower.dispose();
+            if (this.itemTower) this.itemTower.dispose();
+        } catch (e) {
+            console.warn('Error disposing model:', e);
         }
     }
 }
