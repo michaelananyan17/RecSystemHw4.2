@@ -1,4 +1,4 @@
-// app.js
+// app.js (COMPLETE AND SYNCHRONIZED)
 class MovieLensApp {
     constructor() {
         this.interactions = [];
@@ -18,7 +18,7 @@ class MovieLensApp {
             maxInteractions: 80000,
             embeddingDim: 32,
             userFeatureDim: 3, // avg_rating, rating_count, rating_std
-            itemFeatureDim: 18, // 18 genres in MovieLens
+            itemFeatureDim: 19, // 19 genres in MovieLens
             batchSize: 512,
             epochs: 20,
             learningRate: 0.001,
@@ -42,6 +42,7 @@ class MovieLensApp {
         document.querySelectorAll('input[name="modelType"]').forEach(radio => {
             radio.addEventListener('change', (e) => {
                 this.currentModelType = e.target.value;
+                this.updateStatus(`Model type changed to: ${e.target.value}`);
             });
         });
         
@@ -91,8 +92,14 @@ class MovieLensApp {
                 const yearMatch = title.match(/\((\d{4})\)$/);
                 const year = yearMatch ? parseInt(yearMatch[1]) : null;
                 
-                // Parse genres (last 19 fields)
-                const genres = parts.slice(5, 24).map(g => parseInt(g));
+                // Parse genres (last 19 fields) - ensure we get exactly 19 genres
+                const genres = parts.slice(5, 5 + 19).map(g => parseInt(g));
+                if (genres.length !== 19) {
+                    console.warn(`Item ${itemId} has ${genres.length} genres, padding to 19`);
+                    // Pad to 19 genres
+                    while (genres.length < 19) genres.push(0);
+                    if (genres.length > 19) genres.length = 19;
+                }
                 
                 this.items.set(itemId, {
                     title: title.replace(/\(\d{4}\)$/, '').trim(),
@@ -113,6 +120,7 @@ class MovieLensApp {
             
         } catch (error) {
             this.updateStatus(`Error loading data: ${error.message}`);
+            console.error('Data loading error:', error);
         }
     }
     
@@ -196,122 +204,156 @@ class MovieLensApp {
         
         this.updateStatus('Initializing models...');
         
-        // Get item feature matrix
-        const itemFeatures = [];
-        for (let i = 0; i < this.itemMap.size; i++) {
-            const originalItemId = this.reverseItemMap.get(i);
-            const item = this.items.get(originalItemId);
-            itemFeatures.push(item.genreVector);
-        }
-        
-        // Initialize models based on selection
-        const trainSimple = this.currentModelType === 'simple' || this.currentModelType === 'both';
-        const trainMLP = this.currentModelType === 'mlp' || this.currentModelType === 'both';
-        
-        if (trainSimple) {
-            this.model = new TwoTowerModel(
-                this.userMap.size,
-                this.itemMap.size,
-                this.config.embeddingDim,
-                'simple'
-            );
-        }
-        
-        if (trainMLP) {
-            this.mlpModel = new TwoTowerModel(
-                this.userMap.size,
-                this.itemMap.size,
-                this.config.embeddingDim,
-                'mlp',
-                {
-                    userFeatureDim: this.config.userFeatureDim,
-                    itemFeatureDim: this.config.itemFeatureDim,
-                    hiddenUnits: this.config.mlpHiddenUnits
+        try {
+            // Check if TwoTowerModel is available
+            if (typeof TwoTowerModel === 'undefined') {
+                throw new Error('TwoTowerModel class not found. Check if two-tower.js is loaded.');
+            }
+
+            // Get item feature matrix
+            const itemFeatures = [];
+            for (let i = 0; i < this.itemMap.size; i++) {
+                const originalItemId = this.reverseItemMap.get(i);
+                const item = this.items.get(originalItemId);
+                if (item && item.genreVector) {
+                    itemFeatures.push(item.genreVector);
+                } else {
+                    // Fallback: zero vector if item not found
+                    itemFeatures.push(Array(19).fill(0));
                 }
-            );
-            
-            // Set feature matrices
-            const userFeatureArray = [];
-            for (let i = 0; i < this.userMap.size; i++) {
-                const originalUserId = this.reverseUserMap.get(i);
-                userFeatureArray.push(this.userFeatures.get(originalUserId));
             }
             
-            this.mlpModel.setUserFeatures(userFeatureArray);
-            this.mlpModel.setItemFeatures(itemFeatures);
-        }
-        
-        // Prepare training data
-        const userIndices = this.interactions.map(i => this.userMap.get(i.userId));
-        const itemIndices = this.interactions.map(i => this.itemMap.get(i.itemId));
-        
-        this.updateStatus('Starting training...');
-        
-        // Training loop
-        const numBatches = Math.ceil(userIndices.length / this.config.batchSize);
-        
-        for (let epoch = 0; epoch < this.config.epochs; epoch++) {
-            let epochLoss = 0;
-            let mlpEpochLoss = 0;
-            let simpleBatches = 0;
-            let mlpBatches = 0;
+            console.log(`Item features: ${itemFeatures.length} items, dim: ${itemFeatures[0]?.length}`);
             
-            for (let batch = 0; batch < numBatches; batch++) {
-                const start = batch * this.config.batchSize;
-                const end = Math.min(start + this.config.batchSize, userIndices.length);
-                
-                const batchUsers = userIndices.slice(start, end);
-                const batchItems = itemIndices.slice(start, end);
-                
-                if (trainSimple) {
-                    const loss = await this.model.trainStep(batchUsers, batchItems);
-                    epochLoss += loss;
-                    simpleBatches++;
-                    this.lossHistory.push(loss);
-                }
-                
-                if (trainMLP) {
-                    const mlpLoss = await this.mlpModel.trainStep(batchUsers, batchItems);
-                    mlpEpochLoss += mlpLoss;
-                    mlpBatches++;
-                    this.mlpLossHistory.push(mlpLoss);
-                }
-                
-                this.updateLossChart();
-                
-                if (batch % 10 === 0) {
-                    let statusMsg = `Epoch ${epoch + 1}/${this.config.epochs}, Batch ${batch}/${numBatches}`;
-                    if (trainSimple) statusMsg += `, Simple Loss: ${this.lossHistory[this.lossHistory.length-1]?.toFixed(4) || 'N/A'}`;
-                    if (trainMLP) statusMsg += `, MLP Loss: ${this.mlpLossHistory[this.mlpLossHistory.length-1]?.toFixed(4) || 'N/A'}`;
-                    this.updateStatus(statusMsg);
-                }
-                
-                // Allow UI to update
-                await new Promise(resolve => setTimeout(resolve, 0));
-            }
+            // Initialize models based on selection
+            const trainSimple = this.currentModelType === 'simple' || this.currentModelType === 'both';
+            const trainMLP = this.currentModelType === 'mlp' || this.currentModelType === 'both';
             
             if (trainSimple) {
-                epochLoss /= simpleBatches;
+                this.updateStatus('Initializing simple model...');
+                this.model = new TwoTowerModel(
+                    this.userMap.size,
+                    this.itemMap.size,
+                    this.config.embeddingDim,
+                    'simple'
+                );
+                console.log('Simple model initialized');
             }
+            
             if (trainMLP) {
-                mlpEpochLoss /= mlpBatches;
+                this.updateStatus('Initializing MLP model...');
+                this.mlpModel = new TwoTowerModel(
+                    this.userMap.size,
+                    this.itemMap.size,
+                    this.config.embeddingDim,
+                    'mlp',
+                    {
+                        userFeatureDim: this.config.userFeatureDim,
+                        itemFeatureDim: this.config.itemFeatureDim,
+                        hiddenUnits: this.config.mlpHiddenUnits
+                    }
+                );
+                
+                // Set feature matrices
+                const userFeatureArray = [];
+                for (let i = 0; i < this.userMap.size; i++) {
+                    const originalUserId = this.reverseUserMap.get(i);
+                    const features = this.userFeatures.get(originalUserId) || [0, 0, 0];
+                    userFeatureArray.push(features);
+                }
+                
+                console.log(`User features: ${userFeatureArray.length} users, dim: ${userFeatureArray[0]?.length}`);
+                
+                this.mlpModel.setUserFeatures(userFeatureArray);
+                this.mlpModel.setItemFeatures(itemFeatures);
+                console.log('MLP model initialized');
             }
             
-            let epochMsg = `Epoch ${epoch + 1}/${this.config.epochs} completed.`;
-            if (trainSimple) epochMsg += ` Simple avg loss: ${epochLoss.toFixed(4)}.`;
-            if (trainMLP) epochMsg += ` MLP avg loss: ${mlpEpochLoss.toFixed(4)}.`;
+            // Prepare training data
+            const userIndices = this.interactions.map(i => this.userMap.get(i.userId));
+            const itemIndices = this.interactions.map(i => this.itemMap.get(i.itemId));
             
-            this.updateStatus(epochMsg);
+            this.updateStatus('Starting training...');
+            
+            // Training loop
+            const numBatches = Math.ceil(userIndices.length / this.config.batchSize);
+            
+            for (let epoch = 0; epoch < this.config.epochs; epoch++) {
+                let epochLoss = 0;
+                let mlpEpochLoss = 0;
+                let simpleBatches = 0;
+                let mlpBatches = 0;
+                
+                for (let batch = 0; batch < numBatches; batch++) {
+                    const start = batch * this.config.batchSize;
+                    const end = Math.min(start + this.config.batchSize, userIndices.length);
+                    
+                    const batchUsers = userIndices.slice(start, end);
+                    const batchItems = itemIndices.slice(start, end);
+                    
+                    try {
+                        if (trainSimple) {
+                            const loss = await this.model.trainStep(batchUsers, batchItems);
+                            epochLoss += loss;
+                            simpleBatches++;
+                            this.lossHistory.push(loss);
+                        }
+                        
+                        if (trainMLP) {
+                            const mlpLoss = await this.mlpModel.trainStep(batchUsers, batchItems);
+                            mlpEpochLoss += mlpLoss;
+                            mlpBatches++;
+                            this.mlpLossHistory.push(mlpLoss);
+                        }
+                    } catch (error) {
+                        console.error(`Training error in batch ${batch}:`, error);
+                        this.updateStatus(`Error in batch ${batch}: ${error.message}`);
+                        // Continue with next batch
+                        continue;
+                    }
+                    
+                    this.updateLossChart();
+                    
+                    if (batch % 10 === 0) {
+                        let statusMsg = `Epoch ${epoch + 1}/${this.config.epochs}, Batch ${batch}/${numBatches}`;
+                        if (trainSimple && this.lossHistory.length > 0) statusMsg += `, Simple Loss: ${this.lossHistory[this.lossHistory.length-1].toFixed(4)}`;
+                        if (trainMLP && this.mlpLossHistory.length > 0) statusMsg += `, MLP Loss: ${this.mlpLossHistory[this.mlpLossHistory.length-1].toFixed(4)}`;
+                        this.updateStatus(statusMsg);
+                    }
+                    
+                    // Allow UI to update
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
+                
+                if (trainSimple && simpleBatches > 0) {
+                    epochLoss /= simpleBatches;
+                }
+                if (trainMLP && mlpBatches > 0) {
+                    mlpEpochLoss /= mlpBatches;
+                }
+                
+                let epochMsg = `Epoch ${epoch + 1}/${this.config.epochs} completed.`;
+                if (trainSimple) epochMsg += ` Simple avg loss: ${epochLoss.toFixed(4)}.`;
+                if (trainMLP) epochMsg += ` MLP avg loss: ${mlpEpochLoss.toFixed(4)}.`;
+                
+                this.updateStatus(epochMsg);
+            }
+            
+            this.isTraining = false;
+            document.getElementById('train').disabled = false;
+            document.getElementById('test').disabled = false;
+            
+            this.updateStatus('Training completed! Click "Test" to see recommendations.');
+            
+            // Visualize embeddings from the main model
+            this.visualizeEmbeddings();
+            
+        } catch (error) {
+            this.isTraining = false;
+            document.getElementById('train').disabled = false;
+            this.updateStatus(`Training error: ${error.message}`);
+            console.error('Training error:', error);
         }
-        
-        this.isTraining = false;
-        document.getElementById('train').disabled = false;
-        document.getElementById('test').disabled = false;
-        
-        this.updateStatus('Training completed! Click "Test" to see recommendations.');
-        
-        // Visualize embeddings from the main model
-        this.visualizeEmbeddings();
     }
     
     updateLossChart() {
