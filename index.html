@@ -1,10 +1,11 @@
+<!-- index.html -->
 <!DOCTYPE html>
 <html>
 <head>
     <title>Two-Tower Movie Recommender</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
+        .container { max-width: 1400px; margin: 0 auto; }
         .controls { margin: 20px 0; }
         button { padding: 10px 15px; margin: 5px; font-size: 16px; }
         .status { margin: 10px 0; padding: 10px; background: #f0f0f0; border-radius: 5px; }
@@ -16,11 +17,27 @@
         th { background-color: #f2f2f2; }
         .side-by-side { display: flex; gap: 20px; }
         .side-by-side > div { flex: 1; }
+        .three-column { display: flex; gap: 15px; }
+        .three-column > div { flex: 1; }
+        .config { margin: 10px 0; padding: 10px; background: #f8f8f8; border-radius: 5px; }
+        label { margin-right: 15px; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Two-Tower Movie Recommender</h1>
+        
+        <div class="config">
+            <label>
+                <input type="radio" name="modelType" value="simple" checked> Simple Embedding Model
+            </label>
+            <label>
+                <input type="radio" name="modelType" value="mlp"> MLP Deep Learning Model
+            </label>
+            <label>
+                <input type="radio" name="modelType" value="both"> Compare Both Models
+            </label>
+        </div>
         
         <div class="controls">
             <button id="loadData">Load Data</button>
