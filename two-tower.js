@@ -1,11 +1,13 @@
+// two-tower.js
 class TwoTowerModel {
-    constructor(numUsers, numItems, embeddingDim) {
+    constructor(numUsers, numItems, embeddingDim, modelType = 'simple', mlpConfig = {}) {
         this.numUsers = numUsers;
         this.numItems = numItems;
         this.embeddingDim = embeddingDim;
+        this.modelType = modelType;
+        this.mlpConfig = mlpConfig;
         
         // Initialize embedding tables with small random values
-        // Two-tower architecture: separate user and item embeddings
         this.userEmbeddings = tf.variable(
             tf.randomNormal([numUsers, embeddingDim], 0, 0.05), 
             true, 
@@ -18,35 +20,106 @@ class TwoTowerModel {
             'item_embeddings'
         );
         
+        // MLP-specific components
+        if (modelType === 'mlp') {
+            this.userFeatures = null;
+            this.itemFeatures = null;
+            
+            const userFeatureDim = mlpConfig.userFeatureDim || 3;
+            const itemFeatureDim = mlpConfig.itemFeatureDim || 18;
+            const hiddenUnits = mlpConfig.hiddenUnits || 64;
+            
+            // User tower MLP
+            this.userTower = this.buildMLP(
+                userFeatureDim,
+                hiddenUnits,
+                embeddingDim,
+                'user_tower'
+            );
+            
+            // Item tower MLP  
+            this.itemTower = this.buildMLP(
+                itemFeatureDim,
+                hiddenUnits,
+                embeddingDim,
+                'item_tower'
+            );
+        }
+        
         // Adam optimizer for stable training
         this.optimizer = tf.train.adam(0.001);
     }
     
-    // User tower: simple embedding lookup
-    userForward(userIndices) {
-        return tf.gather(this.userEmbeddings, userIndices);
+    buildMLP(inputDim, hiddenUnits, outputDim, name) {
+        const model = tf.sequential();
+        
+        // Hidden layer
+        model.add(tf.layers.dense({
+            units: hiddenUnits,
+            activation: 'relu',
+            inputShape: [inputDim],
+            name: `${name}_hidden`
+        }));
+        
+        // Output layer
+        model.add(tf.layers.dense({
+            units: outputDim,
+            activation: 'linear',
+            name: `${name}_output`
+        }));
+        
+        return model;
     }
     
-    // Item tower: simple embedding lookup  
+    setUserFeatures(userFeatures) {
+        if (this.modelType === 'mlp') {
+            this.userFeatures = tf.tensor2d(userFeatures);
+        }
+    }
+    
+    setItemFeatures(itemFeatures) {
+        if (this.modelType === 'mlp') {
+            this.itemFeatures = tf.tensor2d(itemFeatures);
+        }
+    }
+    
+    // User tower: simple embedding lookup or MLP
+    userForward(userIndices) {
+        if (this.modelType === 'simple') {
+            return tf.gather(this.userEmbeddings, userIndices);
+        } else {
+            if (!this.userFeatures) {
+                throw new Error('User features not set for MLP model');
+            }
+            const features = tf.gather(this.userFeatures, userIndices);
+            return this.userTower.apply(features);
+        }
+    }
+    
+    // Item tower: simple embedding lookup or MLP
     itemForward(itemIndices) {
-        return tf.gather(this.itemEmbeddings, itemIndices);
+        if (this.modelType === 'simple') {
+            return tf.gather(this.itemEmbeddings, itemIndices);
+        } else {
+            if (!this.itemFeatures) {
+                throw new Error('Item features not set for MLP model');
+            }
+            const features = tf.gather(this.itemFeatures, itemIndices);
+            return this.itemTower.apply(features);
+        }
     }
     
     // Scoring function: dot product between user and item embeddings
-    // Dot product is efficient and commonly used in retrieval systems
     score(userEmbeddings, itemEmbeddings) {
         return tf.sum(tf.mul(userEmbeddings, itemEmbeddings), -1);
     }
     
     async trainStep(userIndices, itemIndices) {
-        return await tf.tidy(() => {
-            const userTensor = tf.tensor1d(userIndices, 'int32');
-            const itemTensor = tf.tensor1d(itemIndices, 'int32');
-            
-            // In-batch sampled softmax loss:
-            // Use all items in batch as negatives for each user
-            // Diagonal elements are positive pairs
-            const loss = () => {
+        const userTensor = tf.tensor1d(userIndices, 'int32');
+        const itemTensor = tf.tensor1d(itemIndices, 'int32');
+        
+        try {
+            const lossFn = () => {
                 const userEmbs = this.userForward(userTensor);
                 const itemEmbs = this.itemForward(itemTensor);
                 
@@ -54,25 +127,24 @@ class TwoTowerModel {
                 const logits = tf.matMul(userEmbs, itemEmbs, false, true);
                 
                 // Labels: diagonal elements are positives
-                // Use int32 tensor for oneHot indices
                 const labels = tf.oneHot(
                     tf.range(0, userIndices.length, 1, 'int32'), 
                     userIndices.length
                 );
                 
                 // Softmax cross entropy loss
-                // This encourages positive pairs to have higher scores than negatives
                 const loss = tf.losses.softmaxCrossEntropy(labels, logits);
                 return loss;
             };
             
-            // Compute gradients and update embeddings
-            const { value, grads } = this.optimizer.computeGradients(loss);
+            const lossValue = this.optimizer.minimize(lossFn, true);
             
-            this.optimizer.applyGradients(grads);
-            
-            return value.dataSync()[0];
-        });
+            return lossValue ? lossValue.dataSync()[0] : 0;
+        } finally {
+            // Clean up tensors
+            userTensor.dispose();
+            itemTensor.dispose();
+        }
     }
     
     getUserEmbedding(userIndex) {
@@ -90,7 +162,7 @@ class TwoTowerModel {
     }
     
     getItemEmbeddings() {
-        // Return the tensor directly - call arraySync() on the tensor, not this method
         return this.itemEmbeddings;
     }
 }
+
