@@ -1,4 +1,4 @@
-// app.js (FIXED WITH BETTER MLP TRAINING)
+// app.js (FIXED MODEL MANAGEMENT)
 class MovieLensApp {
     constructor() {
         this.interactions = [];
@@ -13,22 +13,23 @@ class MovieLensApp {
         this.genreMap = new Map();
         this.model = null;
         this.mlpModel = null;
+        this.modelCounter = 0;
         
         this.config = {
-            maxInteractions: 20000, // Reduced for faster training
+            maxInteractions: 20000,
             embeddingDim: 32,
-            userFeatureDim: 3, // avg_rating, rating_count, rating_std - USER FEATURES
-            itemFeatureDim: 19, // 19 genres in MovieLens - ITEM FEATURES (GENRES)
+            userFeatureDim: 3,
+            itemFeatureDim: 19,
             batchSize: 256,
             epochs: 15,
             learningRate: 0.001,
-            mlpHiddenUnits: 64 // MLP with one hidden layer
+            mlpHiddenUnits: 64
         };
         
         this.lossHistory = [];
         this.mlpLossHistory = [];
         this.isTraining = false;
-        this.currentModelType = 'both'; // Default to compare both
+        this.currentModelType = 'both';
         
         this.initializeUI();
     }
@@ -38,7 +39,6 @@ class MovieLensApp {
         document.getElementById('train').addEventListener('click', () => this.train());
         document.getElementById('test').addEventListener('click', () => this.test());
         
-        // Add model type change listeners
         document.querySelectorAll('input[name="modelType"]').forEach(radio => {
             radio.addEventListener('change', (e) => {
                 this.currentModelType = e.target.value;
@@ -53,6 +53,9 @@ class MovieLensApp {
         this.updateStatus('Loading data and extracting features...');
         
         try {
+            // Clear any existing models and variables
+            this.disposeExistingModels();
+            
             // Load interactions
             const interactionsResponse = await fetch('data/u.data');
             const interactionsText = await interactionsResponse.text();
@@ -92,10 +95,9 @@ class MovieLensApp {
                 const yearMatch = title.match(/\((\d{4})\)$/);
                 const year = yearMatch ? parseInt(yearMatch[1]) : null;
                 
-                // Parse genres (last 19 fields) - ITEM FEATURES
+                // Parse genres
                 const genres = parts.slice(5, 5 + 19).map(g => parseInt(g));
                 if (genres.length !== 19) {
-                    // Pad to 19 genres
                     while (genres.length < 19) genres.push(0);
                     if (genres.length > 19) genres.length = 19;
                 }
@@ -104,16 +106,16 @@ class MovieLensApp {
                     title: title.replace(/\(\d{4}\)$/, '').trim(),
                     year: year,
                     genres: genres,
-                    genreVector: genres // Genre features for MLP
+                    genreVector: genres
                 });
             });
             
-            // Create mappings and compute USER FEATURES
+            // Create mappings and compute features
             this.createMappings();
             this.computeUserFeatures();
             this.findQualifiedUsers();
             
-            this.updateStatus(`Loaded ${this.interactions.length} interactions and ${this.items.size} items. ${this.userTopRated.size} users have 20+ ratings. Features extracted: User(3) + Item Genres(19).`);
+            this.updateStatus(`Loaded ${this.interactions.length} interactions and ${this.items.size} items. ${this.userTopRated.size} users have 20+ ratings.`);
             
             document.getElementById('train').disabled = false;
             
@@ -123,8 +125,27 @@ class MovieLensApp {
         }
     }
     
+    disposeExistingModels() {
+        this.updateStatus('Cleaning up existing models...');
+        try {
+            if (this.model) {
+                this.model.dispose();
+                this.model = null;
+            }
+            if (this.mlpModel) {
+                this.mlpModel.dispose();
+                this.mlpModel = null;
+            }
+            // Clear TensorFlow.js engine state
+            tf.engine().startScope();
+            tf.engine().endScope();
+            console.log('Existing models disposed');
+        } catch (e) {
+            console.warn('Error disposing models:', e);
+        }
+    }
+    
     createMappings() {
-        // Create user and item mappings to 0-based indices
         const userSet = new Set(this.interactions.map(i => i.userId));
         const itemSet = new Set(this.interactions.map(i => i.itemId));
         
@@ -138,7 +159,6 @@ class MovieLensApp {
             this.reverseItemMap.set(index, itemId);
         });
         
-        // Group interactions by user
         const userInteractions = new Map();
         this.interactions.forEach(interaction => {
             const userId = interaction.userId;
@@ -148,7 +168,6 @@ class MovieLensApp {
             userInteractions.get(userId).push(interaction);
         });
         
-        // Sort each user's interactions by rating (desc) and timestamp (desc)
         userInteractions.forEach((interactions, userId) => {
             interactions.sort((a, b) => {
                 if (b.rating !== a.rating) return b.rating - a.rating;
@@ -160,32 +179,26 @@ class MovieLensApp {
     }
     
     computeUserFeatures() {
-        // Compute USER FEATURES: average rating, rating count, rating standard deviation
         this.userTopRated.forEach((interactions, userId) => {
             const ratings = interactions.map(i => i.rating);
             const avgRating = ratings.reduce((sum, r) => sum + r, 0) / ratings.length;
             const ratingCount = ratings.length;
             
-            // Calculate standard deviation
             const squaredDiffs = ratings.map(r => Math.pow(r - avgRating, 2));
             const variance = squaredDiffs.reduce((sum, sd) => sum + sd, 0) / ratings.length;
             const ratingStd = Math.sqrt(variance);
             
-            // Normalize features
             const normalizedFeatures = [
-                avgRating / 5.0, // Normalize average rating to [0,1]
-                Math.min(ratingCount / 100.0, 1.0), // Normalize count (cap at 100)
-                ratingStd / 2.5 // Normalize std dev (assuming max ~2.5)
+                avgRating / 5.0,
+                Math.min(ratingCount / 100.0, 1.0),
+                ratingStd / 2.5
             ];
             
             this.userFeatures.set(userId, normalizedFeatures);
         });
-        
-        console.log('User features computed:', this.userFeatures.size, 'users');
     }
     
     findQualifiedUsers() {
-        // Filter users with at least 20 ratings
         const qualifiedUsers = [];
         this.userTopRated.forEach((interactions, userId) => {
             if (interactions.length >= 20) {
@@ -203,15 +216,13 @@ class MovieLensApp {
         this.lossHistory = [];
         this.mlpLossHistory = [];
         
-        this.updateStatus('Initializing models...');
+        // Dispose any existing models before creating new ones
+        this.disposeExistingModels();
+        
+        this.updateStatus('Initializing models with unique variable names...');
         
         try {
-            // Check if TwoTowerModel is available
-            if (typeof TwoTowerModel === 'undefined') {
-                throw new Error('TwoTowerModel class not found. Check if two-tower.js is loaded.');
-            }
-
-            // Get ITEM FEATURES (genres) for MLP
+            // Get item features
             const itemFeatures = [];
             for (let i = 0; i < this.itemMap.size; i++) {
                 const originalItemId = this.reverseItemMap.get(i);
@@ -219,14 +230,10 @@ class MovieLensApp {
                 if (item && item.genreVector) {
                     itemFeatures.push(item.genreVector);
                 } else {
-                    // Fallback: zero vector if item not found
                     itemFeatures.push(Array(19).fill(0));
                 }
             }
             
-            console.log(`Item features: ${itemFeatures.length} items, dim: ${itemFeatures[0]?.length}`);
-            
-            // Initialize models based on selection
             const trainSimple = this.currentModelType === 'simple' || this.currentModelType === 'both';
             const trainMLP = this.currentModelType === 'mlp' || this.currentModelType === 'both';
             
@@ -236,13 +243,15 @@ class MovieLensApp {
                     this.userMap.size,
                     this.itemMap.size,
                     this.config.embeddingDim,
-                    'simple'
+                    'simple',
+                    {},
+                    `simple_${this.modelCounter++}`
                 );
                 console.log('Simple model initialized');
             }
             
             if (trainMLP) {
-                this.updateStatus('Initializing MLP Deep Learning Model with user features and genre features...');
+                this.updateStatus('Initializing MLP Deep Learning Model...');
                 this.mlpModel = new TwoTowerModel(
                     this.userMap.size,
                     this.itemMap.size,
@@ -252,10 +261,10 @@ class MovieLensApp {
                         userFeatureDim: this.config.userFeatureDim,
                         itemFeatureDim: this.config.itemFeatureDim,
                         hiddenUnits: this.config.mlpHiddenUnits
-                    }
+                    },
+                    `mlp_${this.modelCounter++}`
                 );
                 
-                // Set USER FEATURES for MLP
                 const userFeatureArray = [];
                 for (let i = 0; i < this.userMap.size; i++) {
                     const originalUserId = this.reverseUserMap.get(i);
@@ -263,23 +272,21 @@ class MovieLensApp {
                     userFeatureArray.push(features);
                 }
                 
-                console.log(`User features: ${userFeatureArray.length} users, dim: ${userFeatureArray[0]?.length}`);
-                
                 this.mlpModel.setUserFeatures(userFeatureArray);
                 this.mlpModel.setItemFeatures(itemFeatures);
-                console.log('MLP model initialized with user and genre features');
+                console.log('MLP model initialized');
             }
             
             // Prepare training data
             const userIndices = this.interactions.map(i => this.userMap.get(i.userId));
             const itemIndices = this.interactions.map(i => this.itemMap.get(i.itemId));
             
-            // Shuffle training data for better convergence
+            // Shuffle data
             const shuffledIndices = this.shuffleArray([...userIndices.keys()]);
             const shuffledUsers = shuffledIndices.map(i => userIndices[i]);
             const shuffledItems = shuffledIndices.map(i => itemIndices[i]);
             
-            this.updateStatus('Starting training... MLP uses user features + genre features.');
+            this.updateStatus('Starting training...');
             
             // Training loop
             const numBatches = Math.ceil(shuffledUsers.length / this.config.batchSize);
@@ -298,7 +305,7 @@ class MovieLensApp {
                     const batchItems = shuffledItems.slice(start, end);
                     
                     try {
-                        if (trainSimple) {
+                        if (trainSimple && this.model) {
                             const loss = await this.model.trainStep(batchUsers, batchItems);
                             if (!isNaN(loss)) {
                                 epochLoss += loss;
@@ -307,7 +314,7 @@ class MovieLensApp {
                             }
                         }
                         
-                        if (trainMLP) {
+                        if (trainMLP && this.mlpModel) {
                             const mlpLoss = await this.mlpModel.trainStep(batchUsers, batchItems);
                             if (!isNaN(mlpLoss)) {
                                 mlpEpochLoss += mlpLoss;
@@ -317,7 +324,6 @@ class MovieLensApp {
                         }
                     } catch (error) {
                         console.error(`Training error in batch ${batch}:`, error);
-                        this.updateStatus(`Error in batch ${batch}: ${error.message}`);
                         continue;
                     }
                     
@@ -334,7 +340,6 @@ class MovieLensApp {
                         this.updateStatus(statusMsg);
                     }
                     
-                    // Allow UI to update
                     await new Promise(resolve => setTimeout(resolve, 10));
                 }
                 
@@ -350,21 +355,6 @@ class MovieLensApp {
                 if (trainMLP) epochMsg += ` MLP: ${mlpEpochLoss.toFixed(4)}.`;
                 
                 this.updateStatus(epochMsg);
-                
-                // Early stopping check
-                if (epoch > 5) {
-                    const recentSimple = this.lossHistory.slice(-10);
-                    const recentMLP = this.mlpLossHistory.slice(-10);
-                    
-                    if (trainSimple && this.isConverging(recentSimple)) {
-                        this.updateStatus('Simple model converged, stopping early.');
-                        break;
-                    }
-                    if (trainMLP && this.isConverging(recentMLP)) {
-                        this.updateStatus('MLP model converged, stopping early.');
-                        break;
-                    }
-                }
             }
             
             this.isTraining = false;
@@ -373,7 +363,6 @@ class MovieLensApp {
             
             this.updateStatus('Training completed! Click "Test" to compare recommendations.');
             
-            // Visualize embeddings
             this.visualizeEmbeddings();
             
         } catch (error) {
@@ -392,23 +381,286 @@ class MovieLensApp {
         return array;
     }
     
-    isConverging(losses, threshold = 0.001) {
-        if (losses.length < 5) return false;
-        const recent = losses.slice(-5);
-        const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
-        const variance = recent.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / recent.length;
-        return variance < threshold;
+    updateLossChart() {
+        const canvas = document.getElementById('lossChart');
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        if (this.lossHistory.length > 0) {
+            const maxLoss = Math.max(...this.lossHistory);
+            const minLoss = Math.min(...this.lossHistory);
+            const range = maxLoss - minLoss || 1;
+            
+            ctx.strokeStyle = '#007acc';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            
+            this.lossHistory.forEach((loss, index) => {
+                const x = (index / this.lossHistory.length) * canvas.width;
+                const y = canvas.height - ((loss - minLoss) / range) * canvas.height;
+                
+                if (index === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            
+            ctx.stroke();
+        }
+        
+        if (this.mlpLossHistory.length > 0) {
+            const maxLoss = Math.max(...this.mlpLossHistory);
+            const minLoss = Math.min(...this.mlpLossHistory);
+            const range = maxLoss - minLoss || 1;
+            
+            ctx.strokeStyle = '#ff4444';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            
+            this.mlpLossHistory.forEach((loss, index) => {
+                const x = (index / this.mlpLossHistory.length) * canvas.width;
+                const y = canvas.height - ((loss - minLoss) / range) * canvas.height;
+                
+                if (index === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            
+            ctx.stroke();
+        }
+        
+        ctx.fillStyle = '#000';
+        ctx.font = '12px Arial';
+        
+        if (this.lossHistory.length > 0) {
+            const minLoss = Math.min(...this.lossHistory);
+            const maxLoss = Math.max(...this.lossHistory);
+            ctx.fillStyle = '#007acc';
+            ctx.fillText(`Simple Min: ${minLoss.toFixed(4)}`, 10, canvas.height - 30);
+            ctx.fillText(`Simple Max: ${maxLoss.toFixed(4)}`, 10, canvas.height - 15);
+        }
+        
+        if (this.mlpLossHistory.length > 0) {
+            const minLoss = Math.min(...this.mlpLossHistory);
+            const maxLoss = Math.max(...this.mlpLossHistory);
+            ctx.fillStyle = '#ff4444';
+            ctx.fillText(`MLP Min: ${minLoss.toFixed(4)}`, 150, canvas.height - 30);
+            ctx.fillText(`MLP Max: ${maxLoss.toFixed(4)}`, 150, canvas.height - 15);
+        }
+        
+        ctx.fillStyle = '#007acc';
+        ctx.fillText('Simple Model', 300, 20);
+        ctx.fillStyle = '#ff4444';
+        ctx.fillText('MLP Model', 400, 20);
     }
     
-    // ... rest of the methods (updateLossChart, visualizeEmbeddings, test, etc.) remain the same ...
-    
-    updateStatus(message) {
-        document.getElementById('status').textContent = message;
+    async visualizeEmbeddings() {
+        const model = this.model || this.mlpModel;
+        if (!model) return;
+        
+        this.updateStatus('Computing embedding visualization...');
+        
+        const canvas = document.getElementById('embeddingChart');
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        try {
+            const sampleSize = Math.min(500, this.itemMap.size);
+            const sampleIndices = Array.from({length: sampleSize}, (_, i) => 
+                Math.floor(i * this.itemMap.size / sampleSize)
+            );
+            
+            const embeddingsTensor = model.getItemEmbeddings();
+            const embeddings = embeddingsTensor.arraySync();
+            const sampleEmbeddings = sampleIndices.map(i => embeddings[i]);
+            
+            const projected = this.computePCA(sampleEmbeddings, 2);
+            
+            const xs = projected.map(p => p[0]);
+            const ys = projected.map(p => p[1]);
+            
+            const xMin = Math.min(...xs);
+            const xMax = Math.max(...xs);
+            const yMin = Math.min(...ys);
+            const yMax = Math.max(...ys);
+            
+            const xRange = xMax - xMin || 1;
+            const yRange = yMax - yMin || 1;
+            
+            ctx.fillStyle = 'rgba(0, 122, 204, 0.6)';
+            sampleIndices.forEach((itemIdx, i) => {
+                const x = ((projected[i][0] - xMin) / xRange) * (canvas.width - 40) + 20;
+                const y = ((projected[i][1] - yMin) / yRange) * (canvas.height - 40) + 20;
+                
+                ctx.beginPath();
+                ctx.arc(x, y, 3, 0, 2 * Math.PI);
+                ctx.fill();
+            });
+            
+            ctx.fillStyle = '#000';
+            ctx.font = '14px Arial';
+            ctx.fillText('Item Embeddings Projection (PCA)', 10, 20);
+            ctx.font = '12px Arial';
+            ctx.fillText(`Showing ${sampleSize} items`, 10, 40);
+            
+            this.updateStatus('Embedding visualization completed.');
+        } catch (error) {
+            this.updateStatus(`Error in visualization: ${error.message}`);
+        }
     }
-}
-
-// Initialize app when page loads
-let app;
-document.addEventListener('DOMContentLoaded', () => {
-    app = new MovieLensApp();
-});
+    
+    computePCA(embeddings, dimensions) {
+        const n = embeddings.length;
+        const dim = embeddings[0].length;
+        
+        const mean = Array(dim).fill(0);
+        embeddings.forEach(emb => {
+            emb.forEach((val, i) => mean[i] += val);
+        });
+        mean.forEach((val, i) => mean[i] = val / n);
+        
+        const centered = embeddings.map(emb => 
+            emb.map((val, i) => val - mean[i])
+        );
+        
+        const covariance = Array(dim).fill(0).map(() => Array(dim).fill(0));
+        centered.forEach(emb => {
+            for (let i = 0; i < dim; i++) {
+                for (let j = 0; j < dim; j++) {
+                    covariance[i][j] += emb[i] * emb[j];
+                }
+            }
+        });
+        covariance.forEach(row => row.forEach((val, j) => row[j] = val / n));
+        
+        const components = [];
+        for (let d = 0; d < dimensions; d++) {
+            let vector = Array(dim).fill(1/Math.sqrt(dim));
+            
+            for (let iter = 0; iter < 10; iter++) {
+                let newVector = Array(dim).fill(0);
+                
+                for (let i = 0; i < dim; i++) {
+                    for (let j = 0; j < dim; j++) {
+                        newVector[i] += covariance[i][j] * vector[j];
+                    }
+                }
+                
+                const norm = Math.sqrt(newVector.reduce((sum, val) => sum + val * val, 0));
+                vector = newVector.map(val => val / norm);
+            }
+            
+            components.push(vector);
+            
+            for (let i = 0; i < dim; i++) {
+                for (let j = 0; j < dim; j++) {
+                    covariance[i][j] -= vector[i] * vector[j];
+                }
+            }
+        }
+        
+        return embeddings.map(emb => {
+            return components.map(comp => 
+                emb.reduce((sum, val, i) => sum + val * comp[i], 0)
+            );
+        });
+    }
+    
+    async test() {
+        if ((!this.model && !this.mlpModel) || this.qualifiedUsers.length === 0) {
+            this.updateStatus('Model not trained or no qualified users found.');
+            return;
+        }
+        
+        this.updateStatus('Generating recommendations...');
+        
+        try {
+            const randomUser = this.qualifiedUsers[Math.floor(Math.random() * this.qualifiedUsers.length)];
+            const userInteractions = this.userTopRated.get(randomUser);
+            const userIndex = this.userMap.get(randomUser);
+            
+            const results = {
+                historical: userInteractions.slice(0, 10),
+                simpleRecs: [],
+                mlpRecs: []
+            };
+            
+            if (this.model) {
+                const userEmb = this.model.getUserEmbedding(userIndex);
+                const allItemScores = await this.model.getScoresForAllItems(userEmb);
+                results.simpleRecs = this.filterAndSortRecommendations(randomUser, allItemScores);
+            }
+            
+            if (this.mlpModel) {
+                const userEmb = this.mlpModel.getUserEmbedding(userIndex);
+                const allItemScores = await this.mlpModel.getScoresForAllItems(userEmb);
+                results.mlpRecs = this.filterAndSortRecommendations(randomUser, allItemScores);
+            }
+            
+            this.displayResults(randomUser, results);
+            
+        } catch (error) {
+            this.updateStatus(`Error generating recommendations: ${error.message}`);
+        }
+    }
+    
+    filterAndSortRecommendations(userId, allItemScores) {
+        const userInteractions = this.userTopRated.get(userId);
+        const ratedItemIds = new Set(userInteractions.map(i => i.itemId));
+        const candidateScores = [];
+        
+        allItemScores.forEach((score, itemIndex) => {
+            const itemId = this.reverseItemMap.get(itemIndex);
+            if (!ratedItemIds.has(itemId)) {
+                candidateScores.push({ itemId, score, itemIndex });
+            }
+        });
+        
+        candidateScores.sort((a, b) => b.score - a.score);
+        return candidateScores.slice(0, 10);
+    }
+    
+    displayResults(userId, results) {
+        const resultsDiv = document.getElementById('results');
+        
+        let html = `<h2>Recommendations for User ${userId}</h2>`;
+        
+        if (this.currentModelType === 'both') {
+            html += `<div class="three-column">`;
+            
+            html += `<div><h3>Top 10 Rated Movies (Historical)</h3><table><thead><tr><th>Rank</th><th>Movie</th><th>Rating</th><th>Year</th></tr></thead><tbody>`;
+            results.historical.forEach((interaction, index) => {
+                const item = this.items.get(interaction.itemId);
+                html += `<tr><td>${index + 1}</td><td>${item.title}</td><td>${interaction.rating}</td><td>${item.year || 'N/A'}</td></tr>`;
+            });
+            html += `</tbody></table></div>`;
+            
+            html += `<div><h3>Simple Model Recommendations</h3><table><thead><tr><th>Rank</th><th>Movie</th><th>Score</th><th>Year</th></tr></thead><tbody>`;
+            results.simpleRecs.forEach((rec, index) => {
+                const item = this.items.get(rec.itemId);
+                html += `<tr><td>${index + 1}</td><td>${item.title}</td><td>${rec.score.toFixed(4)}</td><td>${item.year || 'N/A'}</td></tr>`;
+            });
+            html += `</tbody></table></div>`;
+            
+            html += `<div><h3>MLP Deep Learning Recommendations</h3><table><thead><tr><th>Rank</th><th>Movie</th><th>Score</th><th>Year</th></tr></thead><tbody>`;
+            results.mlpRecs.forEach((rec, index) => {
+                const item = this.items.get(rec.itemId);
+                html += `<tr><td>${index + 1}</td><td>${item.title}</td><td>${rec.score.toFixed(4)}</td><td>${item.year || 'N/A'}</td></tr>`;
+            });
+            html += `</tbody></table></div>`;
+            
+            html += `</div>`;
+        } else {
+            html += `<div class="side-by-side">`;
+            
+            html += `<div><h3>Top 10 Rated Movies (Historical)</h3><table><thead><tr><th>Rank</th><th>Movie</th><th>Rating</th><th>Year</th></tr></thead><tbody>`;
+            results.historical.forEach((interaction, index) => {
+                const item = this.items.get(interaction.itemId);
+                html += `<tr><td>${index + 1}</td><td>${item.title}</td><td>${interaction.rating}</td><td>${item.year || 'N/A'}</td></tr>`;
+            });
+            html += `</tbody></table></div>`;
+            
+            const modelRecs = this.currentModelType === 'simple' ? results.simpleRecs : results.mlpRecs;
+            const modelName = this.currentModelType === 'simple' ? 'Simple Model' : 'MLP Deep Learning Model';
+            
+            html += `<div><h3>${modelName} Recommendations</h3><table><thead><tr><th>Rank</th><th>Movie</th><th>Score</th><th>Year</th></tr></thead><tbody>`;
+            modelRecs.forEach((rec, index) => {
+                const item = this.items.get(rec.itemId);
+                html += `<
