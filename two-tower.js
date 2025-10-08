@@ -1,260 +1,401 @@
-// two-tower.js (FIXED VARIABLE REGISTRATION)
-class TwoTowerModel {
-    constructor(numUsers, numItems, embeddingDim, modelType = 'simple', mlpConfig = {}, modelId = '') {
-        this.numUsers = numUsers;
-        this.numItems = numItems;
+// Simple Two Tower Embedding Model
+export class TwoTowerModel {
+    constructor(embeddingDim = 8) {
         this.embeddingDim = embeddingDim;
-        this.modelType = modelType;
-        this.mlpConfig = mlpConfig;
-        this.modelId = modelId || `model_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        
-        console.log(`Creating TwoTowerModel: ${modelType}, ID: ${this.modelId}, users: ${numUsers}, items: ${numItems}, embDim: ${embeddingDim}`);
-        
-        // Use unique variable names to avoid registration conflicts
-        const userEmbeddingName = `user_embeddings_${this.modelId}`;
-        const itemEmbeddingName = `item_embeddings_${this.modelId}`;
-        
-        // Check if variables already exist and dispose them first
-        try {
-            const existingUserVars = tf.engine().state.registeredVariables;
-            if (existingUserVars[userEmbeddingName]) {
-                console.log(`Disposing existing variable: ${userEmbeddingName}`);
-                tf.disposeVariables(userEmbeddingName);
+        this.userEmbeddings = new Map();
+        this.movieEmbeddings = new Map();
+        this.userBiases = new Map();
+        this.movieBiases = new Map();
+        this.globalBias = 3.0;
+        this.learningRate = 0.01;
+        this.regularization = 0.001;
+        this.isTrained = false;
+    }
+
+    initializeParameters(userIds, movieIds) {
+        userIds.forEach(userId => {
+            if (!this.userEmbeddings.has(userId)) {
+                this.userEmbeddings.set(userId, this.randomArray(this.embeddingDim, 0.1));
+                this.userBiases.set(userId, 0);
             }
-            if (existingUserVars[itemEmbeddingName]) {
-                console.log(`Disposing existing variable: ${itemEmbeddingName}`);
-                tf.disposeVariables(itemEmbeddingName);
-            }
-        } catch (e) {
-            console.log('No existing variables to dispose');
-        }
-        
-        // Initialize embedding tables with small random values
-        this.userEmbeddings = tf.variable(
-            tf.randomNormal([numUsers, embeddingDim], 0, 0.01),
-            true, 
-            userEmbeddingName
-        );
-        
-        this.itemEmbeddings = tf.variable(
-            tf.randomNormal([numItems, embeddingDim], 0, 0.01),
-            true, 
-            itemEmbeddingName
-        );
-        
-        // MLP-specific components
-        if (modelType === 'mlp') {
-            this.userFeatures = null;
-            this.itemFeatures = null;
-            
-            const userFeatureDim = mlpConfig.userFeatureDim || 3;
-            const itemFeatureDim = mlpConfig.itemFeatureDim || 19;
-            const hiddenUnits = mlpConfig.hiddenUnits || 64;
-            
-            console.log(`Building MLP towers: user_dim=${userFeatureDim}, item_dim=${itemFeatureDim}, hidden=${hiddenUnits}, output=${embeddingDim}`);
-            
-            // User tower MLP
-            this.userTower = this.buildMLP(
-                userFeatureDim,
-                hiddenUnits,
-                embeddingDim,
-                `user_tower_${this.modelId}`
-            );
-            
-            // Item tower MLP  
-            this.itemTower = this.buildMLP(
-                itemFeatureDim,
-                hiddenUnits,
-                embeddingDim,
-                `item_tower_${this.modelId}`
-            );
-            
-            // Separate optimizer for MLP weights
-            this.mlpOptimizer = tf.train.adam(0.0005);
-        }
-        
-        // Adam optimizer for stable training
-        this.optimizer = tf.train.adam(0.001);
-        
-        console.log('TwoTowerModel created successfully');
-    }
-    
-    buildMLP(inputDim, hiddenUnits, outputDim, name) {
-        console.log(`Building MLP ${name}: input=${inputDim}, hidden=${hiddenUnits}, output=${outputDim}`);
-        
-        const model = tf.sequential();
-        
-        // Hidden layer
-        model.add(tf.layers.dense({
-            units: hiddenUnits,
-            activation: 'relu',
-            inputShape: [inputDim],
-            kernelInitializer: 'glorotNormal',
-            biasInitializer: 'zeros',
-            name: `${name}_hidden`
-        }));
-        
-        // Output layer
-        model.add(tf.layers.dense({
-            units: outputDim,
-            activation: 'linear',
-            kernelInitializer: 'glorotNormal',
-            biasInitializer: 'zeros',
-            name: `${name}_output`
-        }));
-        
-        console.log(`MLP ${name} built successfully`);
-        return model;
-    }
-    
-    setUserFeatures(userFeatures) {
-        if (this.modelType === 'mlp') {
-            console.log(`Setting user features: ${userFeatures.length} users, feature dim: ${userFeatures[0]?.length}`);
-            this.userFeatures = tf.tensor2d(userFeatures);
-        }
-    }
-    
-    setItemFeatures(itemFeatures) {
-        if (this.modelType === 'mlp') {
-            console.log(`Setting item features: ${itemFeatures.length} items, feature dim: ${itemFeatures[0]?.length}`);
-            this.itemFeatures = tf.tensor2d(itemFeatures);
-        }
-    }
-    
-    // User tower: simple embedding lookup or MLP
-    userForward(userIndices) {
-        if (this.modelType === 'simple') {
-            return tf.gather(this.userEmbeddings, userIndices);
-        } else {
-            if (!this.userFeatures) {
-                throw new Error('User features not set for MLP model');
-            }
-            const features = tf.gather(this.userFeatures, userIndices);
-            return this.userTower.apply(features);
-        }
-    }
-    
-    // Item tower: simple embedding lookup or MLP
-    itemForward(itemIndices) {
-        if (this.modelType === 'simple') {
-            return tf.gather(this.itemEmbeddings, itemIndices);
-        } else {
-            if (!this.itemFeatures) {
-                throw new Error('Item features not set for MLP model');
-            }
-            const features = tf.gather(this.itemFeatures, itemIndices);
-            return this.itemTower.apply(features);
-        }
-    }
-    
-    // Scoring function: dot product between user and item embeddings
-    score(userEmbeddings, itemEmbeddings) {
-        return tf.sum(tf.mul(userEmbeddings, itemEmbeddings), -1);
-    }
-    
-    async trainStep(userIndices, itemIndices) {
-        const userTensor = tf.tensor1d(userIndices, 'int32');
-        const itemTensor = tf.tensor1d(itemIndices, 'int32');
-        
-        try {
-            if (this.modelType === 'simple') {
-                const lossFn = () => {
-                    const userEmbs = this.userForward(userTensor);
-                    const itemEmbs = this.itemForward(itemTensor);
-                    
-                    const logits = tf.matMul(userEmbs, itemEmbs, false, true);
-                    
-                    const labels = tf.oneHot(
-                        tf.range(0, userIndices.length, 1, 'int32'), 
-                        userIndices.length
-                    );
-                    
-                    const loss = tf.losses.softmaxCrossEntropy(labels, logits);
-                    return loss;
-                };
-                
-                const lossValue = this.optimizer.minimize(lossFn, true);
-                return lossValue ? lossValue.dataSync()[0] : 0;
-                
-            } else {
-                const lossFn = () => {
-                    const userEmbs = this.userForward(userTensor);
-                    const itemEmbs = this.itemForward(itemTensor);
-                    
-                    const logits = tf.matMul(userEmbs, itemEmbs, false, true);
-                    
-                    const labels = tf.oneHot(
-                        tf.range(0, userIndices.length, 1, 'int32'), 
-                        userIndices.length
-                    );
-                    
-                    const loss = tf.losses.softmaxCrossEntropy(labels, logits);
-                    return loss;
-                };
-                
-                const lossValue = this.mlpOptimizer.minimize(lossFn, true);
-                return lossValue ? lossValue.dataSync()[0] : 0;
-            }
-        } catch (error) {
-            console.error('Error in trainStep:', error);
-            throw error;
-        } finally {
-            userTensor.dispose();
-            itemTensor.dispose();
-        }
-    }
-    
-    getUserEmbedding(userIndex) {
-        return tf.tidy(() => {
-            return this.userForward([userIndex]).squeeze();
         });
-    }
-    
-    async getScoresForAllItems(userEmbedding) {
-        return await tf.tidy(() => {
-            if (this.modelType === 'simple') {
-                const scores = tf.dot(this.itemEmbeddings, userEmbedding);
-                return scores.dataSync();
-            } else {
-                const allItemIndices = Array.from({length: this.numItems}, (_, i) => i);
-                const itemTensor = tf.tensor1d(allItemIndices, 'int32');
-                try {
-                    const itemEmbs = this.itemForward(itemTensor);
-                    const scores = tf.dot(itemEmbs, userEmbedding);
-                    return scores.dataSync();
-                } finally {
-                    itemTensor.dispose();
-                }
+
+        movieIds.forEach(movieId => {
+            if (!this.movieEmbeddings.has(movieId)) {
+                this.movieEmbeddings.set(movieId, this.randomArray(this.embeddingDim, 0.1));
+                this.movieBiases.set(movieId, 0);
             }
         });
     }
-    
-    getItemEmbeddings() {
-        if (this.modelType === 'simple') {
-            return this.itemEmbeddings;
-        } else {
-            const allItemIndices = Array.from({length: this.numItems}, (_, i) => i);
-            const itemTensor = tf.tensor1d(allItemIndices, 'int32');
-            const embeddings = this.itemForward(itemTensor);
-            itemTensor.dispose();
-            return embeddings;
-        }
+
+    randomArray(length, scale = 1.0) {
+        return Array.from({length}, () => (Math.random() - 0.5) * 2 * scale);
     }
-    
-    // Clean up method to dispose variables
-    dispose() {
-        console.log(`Disposing model: ${this.modelId}`);
-        try {
-            tf.dispose(this.userEmbeddings);
-            tf.dispose(this.itemEmbeddings);
-            if (this.userFeatures) tf.dispose(this.userFeatures);
-            if (this.itemFeatures) tf.dispose(this.itemFeatures);
-            if (this.userTower) this.userTower.dispose();
-            if (this.itemTower) this.itemTower.dispose();
-        } catch (e) {
-            console.warn('Error disposing model:', e);
+
+    dotProduct(vec1, vec2) {
+        return vec1.reduce((sum, val, i) => sum + val * vec2[i], 0);
+    }
+
+    predict(userId, movieId) {
+        const userEmbedding = this.userEmbeddings.get(userId);
+        const movieEmbedding = this.movieEmbeddings.get(movieId);
+        const userBias = this.userBiases.get(userId) || 0;
+        const movieBias = this.movieBiases.get(movieId) || 0;
+
+        if (!userEmbedding || !movieEmbedding) {
+            return this.globalBias;
         }
+
+        const interaction = this.dotProduct(userEmbedding, movieEmbedding);
+        const prediction = this.globalBias + userBias + movieBias + interaction;
+        
+        // Constrain to rating range
+        return Math.max(1, Math.min(5, prediction));
+    }
+
+    async train(interactions, epochs = 100) {
+        console.log('Training Simple Embedding Model...');
+        
+        const userIds = [...new Set(interactions.map(i => i.userId))];
+        const movieIds = [...new Set(interactions.map(i => i.movieId))];
+        
+        this.initializeParameters(userIds, movieIds);
+        
+        const losses = [];
+        let previousLoss = Infinity;
+
+        for (let epoch = 0; epoch < epochs; epoch++) {
+            let totalLoss = 0;
+            let count = 0;
+
+            // Shuffle interactions
+            const shuffled = [...interactions].sort(() => Math.random() - 0.5);
+            
+            for (const {userId, movieId, rating} of shuffled) {
+                const prediction = this.predict(userId, movieId);
+                const error = prediction - rating;
+                
+                this.updateParameters(userId, movieId, error);
+                
+                totalLoss += error * error;
+                count++;
+            }
+
+            const avgLoss = totalLoss / count;
+            losses.push(avgLoss);
+            
+            // Early stopping if improvement is minimal
+            if (Math.abs(previousLoss - avgLoss) < 0.0001 && epoch > 10) {
+                console.log(`Early stopping at epoch ${epoch}`);
+                break;
+            }
+            previousLoss = avgLoss;
+            
+            if (epoch % 20 === 0) {
+                console.log(`Simple Model Epoch ${epoch}, Loss: ${avgLoss.toFixed(4)}`);
+            }
+        }
+
+        this.isTrained = true;
+        console.log('Simple Embedding Model training completed');
+        return losses;
+    }
+
+    updateParameters(userId, movieId, error) {
+        const userEmbedding = this.userEmbeddings.get(userId);
+        const movieEmbedding = this.movieEmbeddings.get(movieId);
+        
+        if (!userEmbedding || !movieEmbedding) return;
+
+        // Update embeddings with regularization
+        for (let i = 0; i < this.embeddingDim; i++) {
+            const userGrad = error * movieEmbedding[i] + this.regularization * userEmbedding[i];
+            const movieGrad = error * userEmbedding[i] + this.regularization * movieEmbedding[i];
+            
+            userEmbedding[i] -= this.learningRate * userGrad;
+            movieEmbedding[i] -= this.learningRate * movieGrad;
+        }
+
+        // Update biases
+        const userBias = this.userBiases.get(userId) || 0;
+        const movieBias = this.movieBiases.get(movieId) || 0;
+        
+        this.userBiases.set(userId, userBias - this.learningRate * error);
+        this.movieBiases.set(movieId, movieBias - this.learningRate * error);
+    }
+
+    async recommend(userId, allMovieIds, topK = 5) {
+        if (!this.isTrained) {
+            throw new Error('Simple model not trained yet');
+        }
+
+        const scores = allMovieIds.map(movieId => ({
+            movieId,
+            score: this.predict(userId, movieId)
+        }));
+
+        return scores.sort((a, b) => b.score - a.score).slice(0, topK);
+    }
+
+    getMovieEmbeddings() {
+        return Array.from(this.movieEmbeddings.entries()).map(([movieId, vector]) => ({
+            movieId,
+            vector
+        }));
     }
 }
 
-console.log('TwoTowerModel class loaded');
+// Advanced MLP Deep Learning Model
+export class MLPModel {
+    constructor(inputDim = 64, hiddenLayers = [128, 64, 32], outputDim = 1) {
+        this.inputDim = inputDim;
+        this.hiddenLayers = hiddenLayers;
+        this.outputDim = outputDim;
+        this.weights = [];
+        this.biases = [];
+        this.learningRate = 0.001;
+        this.regularization = 0.0001;
+        this.dropoutRate = 0.2;
+        this.isTrained = false;
+        
+        this.initializeNetwork();
+    }
+
+    initializeNetwork() {
+        const dimensions = [this.inputDim, ...this.hiddenLayers, this.outputDim];
+        this.weights = [];
+        this.biases = [];
+
+        for (let i = 0; i < dimensions.length - 1; i++) {
+            const inputSize = dimensions[i];
+            const outputSize = dimensions[i + 1];
+            
+            // He initialization for ReLU
+            const scale = Math.sqrt(2.0 / inputSize);
+            this.weights.push(
+                Array.from({length: outputSize}, () => 
+                    Array.from({length: inputSize}, () => (Math.random() - 0.5) * 2 * scale)
+                )
+            );
+            this.biases.push(Array.from({length: outputSize}, () => 0));
+        }
+    }
+
+    encodeInput(userId, movieId) {
+        // Create a rich feature encoding
+        const encoding = new Array(this.inputDim).fill(0);
+        
+        // User encoding (first 32 dimensions)
+        const userHash = this.stringToHash(userId);
+        for (let i = 0; i < 16; i++) {
+            encoding[(userHash + i) % 32] = 1;
+        }
+        
+        // Movie encoding (next 32 dimensions)
+        const movieHash = this.stringToHash(movieId);
+        for (let i = 0; i < 16; i++) {
+            encoding[32 + (movieHash + i) % 32] = 1;
+        }
+        
+        return encoding;
+    }
+
+    stringToHash(str) {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            const char = str.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // Convert to 32-bit integer
+        }
+        return Math.abs(hash);
+    }
+
+    relu(x) {
+        return Math.max(0, x);
+    }
+
+    reluDerivative(x) {
+        return x > 0 ? 1 : 0.01; // Leaky ReLU derivative
+    }
+
+    sigmoid(x) {
+        return 1 / (1 + Math.exp(-x));
+    }
+
+    forward(input, training = false) {
+        let current = input;
+        const activations = [input];
+        const preActivations = [];
+        const dropoutMasks = [];
+
+        // Hidden layers with dropout
+        for (let i = 0; i < this.weights.length - 1; i++) {
+            const layerPreActivation = this.matrixVectorMultiply(this.weights[i], current);
+            this.vectorAdd(layerPreActivation, this.biases[i]);
+            preActivations.push([...layerPreActivation]);
+            
+            // Apply ReLU activation
+            current = layerPreActivation.map(this.relu);
+            
+            // Apply dropout during training
+            if (training) {
+                const mask = current.map(() => Math.random() > this.dropoutRate ? 1 : 0);
+                current = current.map((val, idx) => val * mask[idx]);
+                dropoutMasks.push(mask);
+            }
+            
+            activations.push(current);
+        }
+
+        // Output layer (linear activation for regression)
+        const outputPreActivation = this.matrixVectorMultiply(this.weights[this.weights.length - 1], current);
+        this.vectorAdd(outputPreActivation, this.biases[this.biases.length - 1]);
+        preActivations.push([...outputPreActivation]);
+        
+        const output = outputPreActivation[0]; // Single output
+        activations.push([output]);
+
+        return { 
+            output, 
+            activations, 
+            preActivations, 
+            dropoutMasks 
+        };
+    }
+
+    matrixVectorMultiply(matrix, vector) {
+        return matrix.map(row => 
+            row.reduce((sum, weight, j) => sum + weight * vector[j], 0)
+        );
+    }
+
+    vectorAdd(vector, other) {
+        for (let i = 0; i < vector.length; i++) {
+            vector[i] += other[i];
+        }
+    }
+
+    predict(userId, movieId) {
+        const input = this.encodeInput(userId, movieId);
+        const { output } = this.forward(input, false);
+        
+        // Constrain output to rating range 1-5 with sigmoid scaling
+        const scaledOutput = 1 + 4 * this.sigmoid(output);
+        return Math.max(1, Math.min(5, scaledOutput));
+    }
+
+    async train(interactions, epochs = 100) {
+        console.log('Training MLP Deep Learning Model...');
+        
+        const losses = [];
+        let previousLoss = Infinity;
+
+        for (let epoch = 0; epoch < epochs; epoch++) {
+            let totalLoss = 0;
+            let count = 0;
+
+            // Shuffle with different random seed each epoch
+            const shuffled = [...interactions].sort(() => Math.random() - 0.5);
+            
+            for (const {userId, movieId, rating} of shuffled) {
+                const input = this.encodeInput(userId, movieId);
+                const { output, activations, preActivations, dropoutMasks } = this.forward(input, true);
+                
+                // Scale target to match output range
+                const scaledTarget = Math.log((rating - 1) / (5 - rating));
+                const error = output - scaledTarget;
+                
+                totalLoss += error * error;
+                count++;
+                
+                // Backpropagation
+                this.backward(input, error, activations, preActivations, dropoutMasks);
+            }
+
+            const avgLoss = totalLoss / count;
+            losses.push(avgLoss);
+            
+            // Adaptive learning rate and early stopping
+            if (avgLoss > previousLoss) {
+                this.learningRate *= 0.95;
+            }
+            
+            if (Math.abs(previousLoss - avgLoss) < 0.0001 && epoch > 20) {
+                console.log(`MLP Early stopping at epoch ${epoch}`);
+                break;
+            }
+            previousLoss = avgLoss;
+            
+            if (epoch % 20 === 0) {
+                console.log(`MLP Epoch ${epoch}, Loss: ${avgLoss.toFixed(4)}, LR: ${this.learningRate.toFixed(6)}`);
+            }
+        }
+
+        this.isTrained = true;
+        console.log('MLP Deep Learning Model training completed');
+        return losses;
+    }
+
+    backward(input, error, activations, preActivations, dropoutMasks) {
+        let delta = [error];
+        const weightGradients = [];
+        const biasGradients = [];
+
+        // Backward pass through layers
+        for (let i = this.weights.length - 1; i >= 0; i--) {
+            const activation = activations[i];
+            const preActivation = preActivations[i];
+            
+            // Calculate gradients for this layer
+            const layerWeightGradients = delta.map(d => 
+                activation.map(a => d * a)
+            );
+            
+            const layerBiasGradients = [...delta];
+            
+            weightGradients.unshift(layerWeightGradients);
+            biasGradients.unshift(layerBiasGradients);
+            
+            // Propagate delta to previous layer (if not input layer)
+            if (i > 0) {
+                const newDelta = new Array(activation.length).fill(0);
+                for (let j = 0; j < activation.length; j++) {
+                    for (let k = 0; k < delta.length; k++) {
+                        newDelta[j] += delta[k] * this.weights[i][k][j] * this.reluDerivative(preActivation[j]);
+                    }
+                    // Apply dropout mask
+                    if (dropoutMasks[i - 1]) {
+                        newDelta[j] *= dropoutMasks[i - 1][j];
+                    }
+                }
+                delta = newDelta;
+            }
+        }
+
+        // Update weights and biases with regularization
+        for (let i = 0; i < this.weights.length; i++) {
+            for (let j = 0; j < this.weights[i].length; j++) {
+                for (let k = 0; k < this.weights[i][j].length; k++) {
+                    const grad = weightGradients[i][j][k] + this.regularization * this.weights[i][j][k];
+                    this.weights[i][j][k] -= this.learningRate * grad;
+                }
+                this.biases[i][j] -= this.learningRate * biasGradients[i][j];
+            }
+        }
+    }
+
+    async recommend(userId, allMovieIds, topK = 5) {
+        if (!this.isTrained) {
+            throw new Error('MLP model not trained yet');
+        }
+
+        const scores = await Promise.all(
+            allMovieIds.map(async movieId => ({
+                movieId,
+                score: this.predict(userId, movieId)
+            }))
+        );
+
+        return scores.sort((a, b) => b.score - a.score).slice(0, topK);
+    }
+}
