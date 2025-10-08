@@ -222,6 +222,11 @@ export class MLPModel {
         return 1 / (1 + Math.exp(-x));
     }
 
+    // FIXED: Added inverse sigmoid function to match training scaling
+    inverseSigmoid(y) {
+        return Math.log(y / (1 - y));
+    }
+
     forward(input, training = false) {
         let current = input;
         const activations = [input];
@@ -279,7 +284,9 @@ export class MLPModel {
         const input = this.encodeInput(userId, movieId);
         const { output } = this.forward(input, false);
         
-        // Constrain output to rating range 1-5 with sigmoid scaling
+        // FIXED: Properly invert the log scaling used in training
+        // During training we use: scaledTarget = Math.log((rating - 1) / (5 - rating))
+        // So for prediction we need to invert this: rating = 1 + 4 * sigmoid(output)
         const scaledOutput = 1 + 4 * this.sigmoid(output);
         return Math.max(1, Math.min(5, scaledOutput));
     }
@@ -301,7 +308,8 @@ export class MLPModel {
                 const input = this.encodeInput(userId, movieId);
                 const { output, activations, preActivations, dropoutMasks } = this.forward(input, true);
                 
-                // Scale target to match output range
+                // Scale target to match output range using logit transformation
+                // This maps [1,5] range to (-∞, +∞) for better regression
                 const scaledTarget = Math.log((rating - 1) / (5 - rating));
                 const error = output - scaledTarget;
                 
@@ -389,12 +397,10 @@ export class MLPModel {
             throw new Error('MLP model not trained yet');
         }
 
-        const scores = await Promise.all(
-            allMovieIds.map(async movieId => ({
-                movieId,
-                score: this.predict(userId, movieId)
-            }))
-        );
+        const scores = allMovieIds.map(movieId => ({
+            movieId,
+            score: this.predict(userId, movieId)
+        }));
 
         return scores.sort((a, b) => b.score - a.score).slice(0, topK);
     }
