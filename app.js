@@ -1,4 +1,4 @@
-import { TwoTowerModel, MLPModel } from './two-tower.js';
+const { TwoTowerModel, MLPModel } = require('./two-tower.js');
 
 class MovieRecommender {
     constructor() {
