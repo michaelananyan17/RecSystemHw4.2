@@ -1,5 +1,5 @@
 // Simple Two Tower Embedding Model
-export class TwoTowerModel {
+class TwoTowerModel {
     constructor(embeddingDim = 8) {
         this.embeddingDim = embeddingDim;
         this.userEmbeddings = new Map();
@@ -146,7 +146,7 @@ export class TwoTowerModel {
 }
 
 // Advanced MLP Deep Learning Model
-export class MLPModel {
+class MLPModel {
     constructor(inputDim = 64, hiddenLayers = [128, 64, 32], outputDim = 1) {
         this.inputDim = inputDim;
         this.hiddenLayers = hiddenLayers;
@@ -222,11 +222,6 @@ export class MLPModel {
         return 1 / (1 + Math.exp(-x));
     }
 
-    // FIXED: Added inverse sigmoid function to match training scaling
-    inverseSigmoid(y) {
-        return Math.log(y / (1 - y));
-    }
-
     forward(input, training = false) {
         let current = input;
         const activations = [input];
@@ -284,9 +279,7 @@ export class MLPModel {
         const input = this.encodeInput(userId, movieId);
         const { output } = this.forward(input, false);
         
-        // FIXED: Properly invert the log scaling used in training
-        // During training we use: scaledTarget = Math.log((rating - 1) / (5 - rating))
-        // So for prediction we need to invert this: rating = 1 + 4 * sigmoid(output)
+        // Properly invert the log scaling used in training
         const scaledOutput = 1 + 4 * this.sigmoid(output);
         return Math.max(1, Math.min(5, scaledOutput));
     }
@@ -309,7 +302,6 @@ export class MLPModel {
                 const { output, activations, preActivations, dropoutMasks } = this.forward(input, true);
                 
                 // Scale target to match output range using logit transformation
-                // This maps [1,5] range to (-∞, +∞) for better regression
                 const scaledTarget = Math.log((rating - 1) / (5 - rating));
                 const error = output - scaledTarget;
                 
@@ -405,3 +397,6 @@ export class MLPModel {
         return scores.sort((a, b) => b.score - a.score).slice(0, topK);
     }
 }
+
+// Export for CommonJS
+module.exports = { TwoTowerModel, MLPModel };
